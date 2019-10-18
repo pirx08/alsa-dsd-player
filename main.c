@@ -23,16 +23,21 @@
 #include <stdint.h>
 #include <alsa/asoundlib.h>
 
-#if 1
+#if 0
 /* 8-bit DSD */
 #define ALSA_FORMAT SND_PCM_FORMAT_DSD_U8
 #define SAMPLE_SIZE (sizeof(uint8_t) * 2)
 #define SAMPLE_RATE_DIV 1
-#else
+#elif 0
 /* 16-bit DSD */
 #define ALSA_FORMAT SND_PCM_FORMAT_DSD_U16
 #define SAMPLE_SIZE (sizeof(uint16_t) * 2)
 #define SAMPLE_RATE_DIV 2
+#else
+/* 32-bit DSD */
+#define ALSA_FORMAT SND_PCM_FORMAT_DSD_U32_LE
+#define SAMPLE_SIZE (sizeof(uint32_t) * 2)
+#define SAMPLE_RATE_DIV 4
 #endif
 
 #define CHANNELCOUNT 2
@@ -134,12 +139,14 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir,
 	return 0;
 }
 
-/* HACK: fast forward to the first data chunk */
+/* HACK: fast forward to the relevant data chunk */
 static int dff_fast_forward(int fd)
 {
 	uint32_t chunk_header = 0;
 	uint64_t dummy;
 	uint8_t b;
+	uint32_t ccnt = 0;
+	uint32_t cnt = 0;
 	int ret;
 
 	while (1) {
@@ -149,9 +156,13 @@ static int dff_fast_forward(int fd)
 
 		chunk_header <<= 8;
 		chunk_header |= b;
+		cnt++;
 
 		if (chunk_header == 0x44534420) { /* 'DSD ' */
+			if (ccnt++ < 2)
+				continue;
 			ret = read(fd, &dummy, sizeof(dummy));
+			fprintf(stdout, "found 'DSD ' @ %#x\n", cnt);
 			break;
 		}
 	}
@@ -196,10 +207,15 @@ int main(int argc, char *argv[])
 			return err;
 	}
 
-	if ((err = open_stream(&playback_handle, "hw:MPD3",
+	if ((err = open_stream(&playback_handle, "hw:CARD=ADSP,DEV=0",
 				SND_PCM_STREAM_PLAYBACK,
 				352800 / SAMPLE_RATE_DIV)) < 0)
 		return err;
+
+	if ((err = snd_pcm_wait(playback_handle, 2000)) < 0) {
+		fprintf(stderr, "poll failed(%s)\n", strerror(errno));
+		return err;
+	}
 
 	if ((err = snd_pcm_prepare(playback_handle)) < 0) {
 		fprintf(stderr, "cannot prepare audio interface for use(%s)\n",
@@ -224,11 +240,6 @@ int main(int argc, char *argv[])
 	while (1) {
 		int r, frames;
 		unsigned int i;
-
-		if ((err = snd_pcm_wait(playback_handle, 1000)) < 0) {
-			fprintf(stderr, "poll failed(%s)\n", strerror(errno));
-			break;
-		}
 
 		frames = snd_pcm_avail_update(playback_handle);
 		if (frames == 0)
